@@ -83,13 +83,15 @@ class PiSessionManager:
         await self._persist_state(conversation_id, state)
 
     async def prompt(
-        self, conversation: Conversation, text: str, *,
+        self, conversation: Conversation, text: str, *, images: list[dict[str, str]] | None = None,
         streaming_behavior: str | None = None, on_text: Callable[[str], None] | None = None,
         on_tool: Callable[[str | None, str | None], None] | None = None,
     ) -> PromptResult:
         async with self.lock_for(conversation.id):
             client = await self.client_for(conversation)
-            result = await client.prompt(text, streaming_behavior=streaming_behavior, on_text=on_text, on_tool=on_tool)
+            result = await client.prompt(
+                text, images=images, streaming_behavior=streaming_behavior, on_text=on_text, on_tool=on_tool,
+            )
             await self._persist_client_state(conversation.id, client, await client.get_state())
             return result
 

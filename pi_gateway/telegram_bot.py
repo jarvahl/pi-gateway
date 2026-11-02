@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import secrets
@@ -20,6 +21,7 @@ from .version_check import check_version, format_status_line
 log = logging.getLogger(__name__)
 
 TELEGRAM_LIMIT = 4096
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 HELP = """Pi Gateway commands:
 /start - initialize and show help
@@ -164,6 +166,7 @@ class TelegramGateway:
             "sessions", "switch", "clone", "models", "model", "thinking", "queue", "steer", "pi",
         ]:
             self.app.add_handler(CommandHandler(command, self._command))
+        self.app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._image_message))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._message))
 
     async def start(self) -> None:
@@ -345,11 +348,55 @@ class TelegramGateway:
             log.exception("message failed")
             await self._reply(update, f"Error: {e}")
 
+    async def _image_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        msg = update.effective_message
+        if not msg:
+            return
+        document = msg.document
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            mime_type = "image/jpeg"
+        elif document:
+            file_id = document.file_id
+            mime_type = document.mime_type or ""
+        else:
+            return
+        if not mime_type.startswith("image/"):
+            return
+        if document and document.file_size and document.file_size > MAX_IMAGE_BYTES:
+            await self._reply(update, "Image is too large; the limit is 10 MiB.")
+            return
+        telegram_file = await self.app.bot.get_file(file_id)
+        data = bytes(await telegram_file.download_as_bytearray())
+        if len(data) > MAX_IMAGE_BYTES:
+            await self._reply(update, "Image is too large; the limit is 10 MiB.")
+            return
+        prompt = msg.caption or "Please inspect this image."
+        conv = await self.conversation_for(update)
+        await self.db.log_message(
+            conv.id, direction="inbound", text=f"[image] {prompt}", platform_message_id=str(msg.message_id),
+        )
+        try:
+            await self._send_to_pi(
+                update,
+                conv,
+                prompt,
+                images=[{"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime_type}],
+            )
+        except Exception as e:
+            log.exception("image message failed")
+            await self._reply(update, f"Error: {e}")
+
     def _drafts_available(self, update: Update) -> bool:
         chat = update.effective_chat
         return bool(chat and chat.type == "private" and hasattr(self.app.bot, "send_message_draft"))
 
-    async def _send_to_pi(self, update: Update, conv: Conversation, text: str, *, streaming_behavior: str | None = None) -> None:
+    async def _send_to_pi(
+        self, update: Update, conv: Conversation, text: str, *, images: list[dict[str, str]] | None = None,
+        streaming_behavior: str | None = None,
+    ) -> None:
         await self._typing(update)
         message = update.effective_message
         if message is None:
@@ -362,7 +409,7 @@ class TelegramGateway:
         )
         try:
             result = await self.sessions.prompt(
-                conv, text, streaming_behavior=streaming_behavior,
+                conv, text, images=images, streaming_behavior=streaming_behavior,
                 on_text=preview.update if preview else None, on_tool=preview.update_tool if preview else None,
             )
         finally:

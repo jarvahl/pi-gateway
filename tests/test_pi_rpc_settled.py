@@ -16,6 +16,22 @@ class PiRpcSettledTest(unittest.IsolatedAsyncioTestCase):
         for event in events:
             await self.client._events.put(event)
 
+    async def test_prompt_forwards_images(self):
+        async def request(payload, **_kwargs):
+            self.assertEqual(payload["images"], [{"type": "image", "data": "abc", "mimeType": "image/png"}])
+            await self.send(
+                {"type": "agent_start"},
+                {"type": "message_end", "message": {"role": "assistant", "content": "seen"}},
+                {"type": "agent_settled"},
+            )
+            return {"success": True}
+
+        self.client.request.side_effect = request
+        result = await self.client.prompt(
+            "What is this?", images=[{"type": "image", "data": "abc", "mimeType": "image/png"}],
+        )
+        self.assertEqual(result.text, "seen")
+
     async def test_compaction_retry_returns_final_run_only_after_settled(self):
         await self.send(
             {"type": "agent_start"},

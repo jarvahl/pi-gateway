@@ -225,10 +225,13 @@ class PiRpcClient:
                 return
 
     async def prompt(
-        self, message: str, *, streaming_behavior: str | None = None, on_text: Callable[[str], None] | None = None,
+        self, message: str, *, images: list[dict[str, str]] | None = None,
+        streaming_behavior: str | None = None, on_text: Callable[[str], None] | None = None,
         on_tool: Callable[[str | None, str | None], None] | None = None,
     ) -> PromptResult:
         payload: dict[str, Any] = {"type": "prompt", "message": message}
+        if images:
+            payload["images"] = images
         if streaming_behavior:
             payload["streamingBehavior"] = streaming_behavior
         await self.start()
