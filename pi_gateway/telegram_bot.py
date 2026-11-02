@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 import secrets
@@ -168,6 +169,54 @@ class TelegramGateway:
             self.app.add_handler(CommandHandler(command, self._command))
         self.app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._image_message))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._message))
+
+    async def run_events(self, event_dir: Path) -> None:
+        while True:
+            try:
+                for event_path in sorted(event_dir.glob("*.json")):
+                    try:
+                        event = json.loads(event_path.read_text(encoding="utf-8"))
+                        await self._dispatch_event(event)
+                    except Exception:
+                        log.exception("event failed: %s", event_path)
+                        event_path.rename(event_path.with_suffix(".failed"))
+                    else:
+                        event_path.unlink(missing_ok=True)
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("event loop failed")
+                await asyncio.sleep(5)
+
+    async def _dispatch_event(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type")
+        message = event.get("message")
+        if not isinstance(event_type, str) or not isinstance(message, str) or not event_type or not message:
+            raise ValueError("event requires non-empty string type and message")
+        prompt = (
+            "[External event]\n"
+            f"Type: {event_type}\n"
+            f"Message: {message}\n\n"
+            "Decide whether the user should be notified. If not, reply exactly NO_REPLY. "
+            "Otherwise reply with a concise Telegram message."
+        )
+        for user_id in self.telegram.allowed_user_ids:
+            conv = await self.db.get_or_create_conversation(
+                platform="telegram",
+                chat_id=str(user_id),
+                thread_id=None,
+                user_id=str(user_id),
+                gateway_session_key=f"telegram:{user_id}:{user_id}",
+                cwd=self.config.pi.cwd,
+            )
+            await self.db.log_message(conv.id, direction="inbound", text=f"[event:{event_type}] {message}")
+            result = await self.sessions.prompt(conv, prompt)
+            await self.db.touch_message(conv.id)
+            await self.db.log_message(conv.id, direction="outbound", text=result.text)
+            if result.text.strip() and result.text.strip() != "NO_REPLY":
+                for chunk in chunks(result.text):
+                    await self.app.bot.send_message(chat_id=user_id, text=chunk, disable_web_page_preview=True)
 
     async def start(self) -> None:
         from telegram import BotCommand, Update

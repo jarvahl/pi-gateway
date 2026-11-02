@@ -5,6 +5,7 @@ import asyncio
 import fcntl
 import hashlib
 import importlib.metadata
+import json
 import logging
 import os
 import shlex
@@ -410,6 +411,10 @@ async def _run_gateway(config: GatewayConfig, config_path: str) -> None:
             pass
 
     await telegram.start()
+    event_task = asyncio.create_task(
+        telegram.run_events(Path(config.database_path).parent / "events"),
+        name="pi-gateway-events",
+    )
     lifecycle_message = "🟢 Pi gateway connected."
     update_notice = format_update_notice(await check_version())
     if update_notice:
@@ -421,6 +426,8 @@ async def _run_gateway(config: GatewayConfig, config_path: str) -> None:
         try:
             await telegram.notify_lifecycle("🔴 Pi gateway disconnected.")
         finally:
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
             await telegram.stop()
             await sessions.stop()
             await db.close()
@@ -904,6 +911,29 @@ def show_logs(args: argparse.Namespace) -> None:
         print()
 
 
+def enqueue_event(args: argparse.Namespace) -> None:
+    config_path = resolve_config(args)
+    if not config_path.is_file():
+        raise SystemExit(f"Config not found: {config_path}")
+    config = load_config(str(config_path))
+    event_dir = Path(config.database_path).parent / "events"
+    event_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    event_id = str(uuid.uuid4())
+    temporary = event_dir / f".{event_id}.tmp"
+    destination = event_dir / f"{event_id}.json"
+    payload = {"id": event_id, "type": args.event_type, "message": args.message}
+    try:
+        with temporary.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            f.write("\\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print(f"Queued event {event_id}")
+
+
 def package_version() -> str:
     try:
         return importlib.metadata.version("pi-gateway")
@@ -1044,6 +1074,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Destination database (default: ~/.local/state/pi-gateway/gateway.sqlite3)",
     )
 
+    event = sub.add_parser("event", help="Queue an event for the running gateway")
+    add_selection_options(event)
+    event.add_argument("event_type", help="Event type, for example deploy_failed")
+    event.add_argument("message", help="Human-readable event message")
+
     config_path = sub.add_parser("config-path", help="Print the effective config path")
     add_selection_options(config_path)
     instances = sub.add_parser("instances", help="List registered gateway instances")
@@ -1097,6 +1132,8 @@ def main() -> None:
         migrate_databases(args)
     elif args.command == "init":
         init_instance(args)
+    elif args.command == "event":
+        enqueue_event(args)
     elif args.command == "instances":
         if args.instances_command == "forget":
             forget_instance(args)
