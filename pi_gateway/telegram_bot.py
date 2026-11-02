@@ -373,7 +373,7 @@ class TelegramGateway:
         if len(data) > MAX_IMAGE_BYTES:
             await self._reply(update, "Image is too large; the limit is 10 MiB.")
             return
-        prompt = msg.caption or "Please inspect this image."
+        prompt = msg.caption or "An image was attached. Respond naturally based on it and the conversation."
         conv = await self.conversation_for(update)
         await self.db.log_message(
             conv.id, direction="inbound", text=f"[image] {prompt}", platform_message_id=str(msg.message_id),
