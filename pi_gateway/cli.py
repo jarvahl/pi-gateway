@@ -925,7 +925,7 @@ def enqueue_event(args: argparse.Namespace) -> None:
     try:
         with temporary.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
-            f.write("\\n")
+            f.write("\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(temporary, destination)
